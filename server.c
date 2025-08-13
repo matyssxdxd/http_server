@@ -24,87 +24,80 @@ typedef struct http_request {
     int len;
 } http_request;
 
-http_request* parse_request(char *rbuf) {
-    http_request *request = malloc(sizeof(http_request));
-    request->len = 0;
-    request->header_count = 0;
-    request->headers = NULL;
-
-    char *crlf_pos = strstr(rbuf, " ");
-    if (crlf_pos != NULL) {
-        int length = crlf_pos - rbuf;
-        request->method = malloc(length + 1);
-        strncpy(request->method, rbuf, length);
-        request->method[length] = '\0';
-        request->len += length + 1;
+int len(char *rbuf, char *str) {
+    char *pos = strstr(rbuf, str);
+    if (pos != NULL) {
+        return pos - rbuf;
     }
+    return -1;
+}
 
-    crlf_pos = strstr(rbuf + request->len, " ");
-    if (crlf_pos != NULL) {
-        int length = crlf_pos - rbuf - request->len;
-        request->request_uri = malloc(length + 1);
-        strncpy(request->request_uri, rbuf + request->len, length);
-        request->request_uri[length] = '\0';
-        request->len += length + 1;
-    }
+void parse_first_line(http_request *req, char *rbuf) {
+    int length = len(rbuf, " ");
+    if (length <= 0) { printf("Error"); }
+    req->method = malloc(length + 1);
+    strncpy(req->method, rbuf, length);
+    req->method[length] = '\0';
+    req->len += length + 1;
 
-    crlf_pos = strstr(rbuf + request->len, "\r\n");
-    if (crlf_pos != NULL) {
-        int length = crlf_pos - rbuf - request->len;
-        request->version = malloc(length + 1);
-        strncpy(request->version, rbuf + request->len, length);
-        request->version[length] = '\0';
-        request->len += length + 2;
-    }
+    length = len(rbuf + req->len, " ");
+    req->request_uri = malloc(length + 1);
+    strncpy(req->request_uri, rbuf + req->len, length);
+    req->request_uri[length] = '\0';
+    req->len += length + 1;
 
-    int current_pos = request->len;
+    length = len(rbuf + req->len, "\r\n");
+    req->version = malloc(length + 1);
+    strncpy(req->version, rbuf + req->len, length);
+    req->version[length] = '\0';
+    req->len += length + 2;
+}
 
+void parse_headers(http_request *req, char *rbuf) {
     while (1) {
-        crlf_pos = strstr(rbuf + current_pos, "\r\n");
-        if (crlf_pos == NULL) {
+        char *pos = strstr(rbuf + req->len, "\r\n");
+        if (pos == NULL) {
             break;
         }
 
-        int length = crlf_pos - rbuf - current_pos;
-
-        if (length == 0) {
-            current_pos += 2; // SKIP CRLF
-            break; 
-        }
+        int length = pos - rbuf - req->len;
+        if (length == 0) { req->len += 2; break; }
 
         char *buf = malloc(length + 1);
-        strncpy(buf, rbuf + current_pos, length);
+        strncpy(buf, rbuf + req->len, length);
         buf[length] = '\0';
-
-        char *pos = strstr(buf, ":");
+        pos = strstr(buf, ":");
         if (pos != NULL) {
             header *head = malloc(sizeof(header));
             int name_len = pos - buf;
             char *value_pos = pos + 2;
             int value_len = (buf + length) - value_pos;
 
-            head->name = malloc(name_len + 1);
+            head->name = malloc(name_len + 1); 
             head->value = malloc(value_len + 1);
             strncpy(head->name, buf, name_len);
             strncpy(head->value, value_pos, value_len); 
             head->name[name_len] = '\0';
             head->value[value_len] = '\0';
 
-            request->headers = realloc(request->headers,
-                                       (request->header_count + 1) * sizeof(header*));
-            request->headers[request->header_count] = head;
-            request->header_count++;
-
-        } else {
-            printf("No colon found in header: %s\n", buf);
+            req->headers = realloc(req->headers,
+                                   (req->header_count + 1) * sizeof(header*));
+            req->headers[req->header_count] = head;
+            req->header_count++;
         }
-
         free(buf);
-
-        current_pos = crlf_pos - rbuf + 2;  // +2 to CRLF 
+        req->len += length + 2;
     }
+}
 
-    request->len = current_pos;
+http_request* parse_request(char *rbuf) {
+    http_request *request = malloc(sizeof(http_request));
+    request->len = 0;
+    request->header_count = 0;
+    request->headers = NULL;
+
+    parse_first_line(request, rbuf);
+    parse_headers(request, rbuf);
 
     return request;
 }
@@ -197,15 +190,15 @@ int main(void) {
             printf("%s:%s\n", req->headers[i]->name, req->headers[i]->value);
         }
 
-//        if (strcmp(req->request_uri, "/") == 0) {
-//            char wbuf[] = "HTTP/1.1 200 OK\r\n"
-//                "Date: Mon, 27 Jul 2002 11:38:44 GMT\r\n"
-//                "Content-Type: text/html\r\n"
-//                "Content-Length: 46\r\n"
-//                "\r\n"
-//                "<html><body><h1>Hello, World!</h1></body></html>";
-//            write(connfd, wbuf, strlen(wbuf));
-//        }
+        if (strcmp(req->request_uri, "/") == 0) {
+            char wbuf[] = "HTTP/1.1 200 OK\r\n"
+                "Date: Mon, 27 Jul 2002 11:38:44 GMT\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: 46\r\n"
+                "\r\n"
+                "<html><body><h1>Hello, World!</h1></body></html>";
+            write(connfd, wbuf, strlen(wbuf));
+        }
         #endif
         
         free_http_request(req);
