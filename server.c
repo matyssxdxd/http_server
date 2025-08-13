@@ -11,7 +11,7 @@
 #define PORT 1337
 
 typedef struct header {
-    char *header;
+    char *name;
     char *value;
 } header;
 
@@ -83,11 +83,11 @@ http_request* parse_request(char *rbuf) {
             char *value_pos = pos + 2;
             int value_len = (buf + length) - value_pos;
 
-            head->header = malloc(name_len + 1);
+            head->name = malloc(name_len + 1);
             head->value = malloc(value_len + 1);
-            strncpy(head->header, buf, name_len);
+            strncpy(head->name, buf, name_len);
             strncpy(head->value, value_pos, value_len); 
-            head->header[name_len] = '\0';
+            head->name[name_len] = '\0';
             head->value[value_len] = '\0';
 
             request->headers = realloc(request->headers,
@@ -107,6 +107,25 @@ http_request* parse_request(char *rbuf) {
     request->len = current_pos;
 
     return request;
+}
+
+void free_http_request(http_request *req) {
+    if (req == NULL) { return; }
+    
+    free(req->method);
+    free(req->request_uri);
+    free(req->version);
+
+    for (int i = 0; i < req->header_count; i++) {
+        if (req->headers[i] != NULL) {
+            free(req->headers[i]->name);
+            free(req->headers[i]->value);
+            free(req->headers[i]);
+        }
+    }
+
+    free(req->headers);
+    free(req);
 }
 
 static void die(const char *msg) {
@@ -175,7 +194,7 @@ int main(void) {
         printf("%s\n", req->request_uri);
         printf("%s\n", req->version);
         for (int i = 0; i < req->header_count; i++) {
-            printf("%s:%s\n", req->headers[i]->header, req->headers[i]->value);
+            printf("%s:%s\n", req->headers[i]->name, req->headers[i]->value);
         }
 
 //        if (strcmp(req->request_uri, "/") == 0) {
@@ -188,9 +207,11 @@ int main(void) {
 //            write(connfd, wbuf, strlen(wbuf));
 //        }
         #endif
-
+        
+        free_http_request(req);
         close(connfd);
     }
 
+    close(fd);
     return 0;
 }
