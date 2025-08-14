@@ -22,7 +22,7 @@ typedef enum {
 } header_type;
 
 typedef enum { 
-    GET, 
+    GET = 1, 
     POST 
 } method_type;
 
@@ -39,12 +39,13 @@ typedef struct header {
 } header;
 
 typedef struct http_request {
-    int method;
+    method_type method;
     char *uri;
     char *version;
     header **headers;
     int header_count;
-    int len;
+    char *body;
+    int body_length;
 } http_request;
 
 typedef struct http_response {
@@ -68,7 +69,7 @@ int len(char *rbuf, char *str) {
     return -1;
 }
 
-int method_str_to_enum(char *method) {
+method_type method_str_to_enum(char *method) {
     if (strcmp(method, "GET") == 0) { return GET; }
     if (strcmp(method, "POST") == 0) { return POST; }
     return -1;
@@ -123,6 +124,13 @@ header_type header_get_type(const char *name) {
     return HEADER_UNKNOWN;
 }
 
+char* header_get_value(http_request *req, const header_type type) {
+    for (int i = 0; i < req->header_count; i++) {
+        if (req->headers[i]->type == type) { return req->headers[i]->value; }
+    }
+    return NULL;
+}
+
 /*
  *   HTTP Request functions
  */
@@ -134,7 +142,8 @@ http_request* request_new() {
     req->version = NULL;
     req->headers = NULL;
     req->header_count = 0;
-    req->len = 0;
+    req->body = NULL;
+    req->body_length = 0;
 
     return req;
 }
@@ -179,7 +188,7 @@ http_request* request_parse(char *rbuf) {
     strncpy(mbuf, tmp_ptr, method_len);
     mbuf[method_len] = '\0';
 
-    int method = method_str_to_enum(mbuf);
+    method_type method = method_str_to_enum(mbuf);
     req->method = method;
     free(mbuf);
     if (method < 0) { 
@@ -246,6 +255,18 @@ http_request* request_parse(char *rbuf) {
         header *head = header_new(header_get_type(name), name, value);
         request_add_header(req, head);
         header_pos = line_end + 2;
+    }
+
+    char *body_pos = header_pos + 2;
+    if (req->method == POST) {
+        char *body_len = header_get_value(req, HEADER_CONTENT_LENGTH);
+        if (body_len == NULL) {
+            // Probably need to handle this somehow
+            return req;
+        } 
+        req->body_length = strtol(body_len, NULL, 10);
+        req->body = malloc(req->body_length + 1);
+        strncpy(req->body, body_pos, req->body_length);
     }
 
     return req;
@@ -325,15 +346,20 @@ http_response* handle_GET_request(http_request *req) {
     return res;
 }
 
+http_response* handle_POST_request(http_request *req) {
+    return NULL;
+}
+
 
 http_response* handle_request(http_request *req) {
     switch (req->method) {
         case GET:
             return handle_GET_request(req);
-        case POST: break;
-        default: break;
+        case POST: 
+            return handle_POST_request(req);
+        default: 
+            return response_new(BAD_REQUEST, "Bad request", "<html><body>Bad request!</body></html>", NULL, 0);
     }
-    return NULL;
 }
 
 char* response_to_string(http_response *res) {
@@ -420,16 +446,17 @@ int main(void) {
         char rbuf[READ_BUFFER_SIZE];
         int total_read = read_http_request(connfd, rbuf);
 
-        if (total_read > 0) {
-            http_request *req = request_parse(rbuf);
+        http_request *req = request_parse(rbuf);
+        http_response *res = handle_request(req);
 
-            http_response *res = handle_request(req);
+        if (res) {
             char *wbuf = response_to_string(res);
             write(connfd, wbuf, strlen(wbuf));
 
             response_del(res);
             request_del(req);
-        };
+        }
+
         close(connfd);
     }
 
