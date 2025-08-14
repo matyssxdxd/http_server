@@ -27,10 +27,11 @@ typedef enum {
 } method_type;
 
 typedef enum { 
+    UNKNOWN = -1,
     OK = 200, 
     NOT_FOUND = 404,
     BAD_REQUEST = 400
-} status_code;
+} status_type;
 
 typedef struct header {
     header_type type;
@@ -50,7 +51,7 @@ typedef struct http_request {
 
 typedef struct http_response {
     char *version;
-    int status_code;
+    status_type status_code;
     char *phrase;
     header **headers;
     int header_count;
@@ -276,32 +277,89 @@ http_request* request_parse(char *rbuf) {
  *   HTTP Response functions
  */
 
-http_response* response_new(int status_code, char *phrase, char *body, header** headers, int header_count) {
+http_response* response_new() {
     http_response *res = malloc(sizeof(http_response));
-    res->version = "HTTP/1.0";
-    res->status_code = status_code;
-    res->header_count = 0;
+    res->version = NULL;
+    res->status_code = UNKNOWN;
     res->headers = NULL;
+    res->header_count = 0;
+    res->phrase = NULL;
+    res->body = NULL;
 
-    res->phrase = malloc(strlen(phrase) + 1);
-    strcpy(res->phrase, phrase);
+    return res;
+}
+
+void add_default_headers(http_response *res) {
+    size_t body_len = strlen(res->body);
+    char body_len_str[32];
+    snprintf(body_len_str, sizeof(body_len_str), "%zu", body_len);
+    header *content_len = header_new(HEADER_CONTENT_LENGTH, "Content-Length", body_len_str);
+    header *content_type = header_new(HEADER_CONTENT_TYPE, "Content-Type", "text/html");
+
+    res->headers = malloc(sizeof(header*) * 2);
+    res->headers[res->header_count++] = content_len;
+    res->headers[res->header_count++] = content_type;
+}
+
+http_response* response_bad_request() {
+    http_response *res = response_new();
+    
+    res->version = malloc(strlen("HTTP/1.0") + 1);
+    strcpy(res->version, "HTTP/1.0");
+    
+    res->status_code = BAD_REQUEST;
+
+    res->phrase = malloc(strlen("Bad Request!") + 1);
+    strcpy(res->phrase, "Bad Request!");
+
+    res->body = malloc(strlen("<html><body><h1>Bad Request!</h1></body></html>") + 1);
+    strcpy(res->body, "<html><body><h1>Bad Request!</h1></body></html>");
+
+    add_default_headers(res);
+
+    return res;
+}
+
+http_response* response_not_found() {
+    http_response *res = response_new();
+
+    res->version = malloc(strlen("HTTP/1.0") + 1);
+    strcpy(res->version, "HTTP/1.0");
+
+    res->status_code = NOT_FOUND;
+
+    res->phrase = malloc(strlen("Not Found!") + 1);
+    strcpy(res->phrase, "Not Found!");
+
+    res->body = malloc(strlen("<html><body><h1>Bad Request!</h1></body></html>") + 1);
+    strcpy(res->body, "<html><body><h1>Not Found!</h1></body></html>");
+
+    add_default_headers(res);
+
+    return res;
+}
+
+http_response* response_ok(char *body) {
+    http_response *res = response_new();
+
+    res->version = malloc(strlen("HTTP/1.0") + 1);
+    strcpy(res->version, "HTTP/1.0");
+
+    res->status_code = OK;
+
+    res->phrase = malloc(strlen("OK!") + 1);
+    strcpy(res->phrase, "OK!");
 
     res->body = malloc(strlen(body) + 1);
     strcpy(res->body, body);
 
-    if (headers) {
-        res->headers = realloc(res->headers,
-                               (res->header_count + header_count) * sizeof(header*));
-        for (int i = res->header_count; i < header_count; i++) {
-            res->headers[i] = headers[i];
-        }
-        res->header_count += header_count;
-    }
+    add_default_headers(res);
 
     return res;
 }
 
 void response_del(http_response *res) {
+    free(res->version);
     free(res->phrase);
 
     for (int i = 0; i < res->header_count; i++) {
@@ -324,10 +382,7 @@ http_response* handle_GET_request(http_request *req) {
     file = fopen(ubuf, "r");
 
     if (file == NULL) {
-        return response_new(NOT_FOUND,
-                            "Not found",
-                            "<html><body>Not found!</body></html>",
-                            NULL, 0);
+        return response_not_found();
     }
 
     fseek(file, 0, SEEK_END);
@@ -338,7 +393,7 @@ http_response* handle_GET_request(http_request *req) {
     fread(bbuf, 1, length, file);
     bbuf[length] = '\0';
     
-    http_response *res = response_new(OK, "OK", bbuf, NULL, 0);
+    http_response *res = response_ok(bbuf);
 
     fclose(file);
     free(ubuf);
@@ -347,6 +402,8 @@ http_response* handle_GET_request(http_request *req) {
 }
 
 http_response* handle_POST_request(http_request *req) {
+    // Extract key:value pairs from body
+    // Do something with it?
     return NULL;
 }
 
@@ -358,7 +415,7 @@ http_response* handle_request(http_request *req) {
         case POST: 
             return handle_POST_request(req);
         default: 
-            return response_new(BAD_REQUEST, "Bad request", "<html><body>Bad request!</body></html>", NULL, 0);
+            return response_bad_request(); 
     }
 }
 
