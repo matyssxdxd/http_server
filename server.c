@@ -268,6 +268,7 @@ http_request* request_parse(char *rbuf) {
         req->body_length = strtol(body_len, NULL, 10);
         req->body = malloc(req->body_length + 1);
         strncpy(req->body, body_pos, req->body_length);
+        req->body[req->body_length] = '\0';
     }
 
     return req;
@@ -402,9 +403,35 @@ http_response* handle_GET_request(http_request *req) {
 }
 
 http_response* handle_POST_request(http_request *req) {
+    char *tmp_ptr = req->body;
+    while (1) {
+        char *amp_pos = strchr(tmp_ptr, '&');
+        char *eq_pos = strchr(tmp_ptr, '='); 
+        int key_len = eq_pos - tmp_ptr;
+        int val_len;
+        if (amp_pos) {
+            val_len = amp_pos - eq_pos - 1;
+        } else {
+            val_len = req->body_length - key_len; 
+        }
+        char *key = malloc(key_len + 1);
+        char *val = malloc(val_len + 1);
+        strncpy(key, tmp_ptr, key_len);
+        strncpy(val, eq_pos + 1, val_len);
+        key[key_len] = '\0';
+        val[val_len] = '\0';
+        printf("key: %s, value: %s\n", key, val);
+        free(key);
+        free(val);
+        if (amp_pos) {
+            tmp_ptr = amp_pos + 1;
+        } else {
+            break;
+        }
+    }
     // Extract key:value pairs from body
     // Do something with it?
-    return NULL;
+    return response_bad_request();
 }
 
 
@@ -506,13 +533,11 @@ int main(void) {
         http_request *req = request_parse(rbuf);
         http_response *res = handle_request(req);
 
-        if (res) {
-            char *wbuf = response_to_string(res);
-            write(connfd, wbuf, strlen(wbuf));
+        char *wbuf = response_to_string(res);
+        write(connfd, wbuf, strlen(wbuf));
 
-            response_del(res);
-            request_del(req);
-        }
+        response_del(res);
+        request_del(req);
 
         close(connfd);
     }
