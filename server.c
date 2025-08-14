@@ -10,7 +10,7 @@
 
 #define PORT 1337
 
-enum { GET = 1, HEAD, POST, PUT, DELETE, CONNECT, TRACE, PATCH, OPTIONS };
+enum { GET = 1, POST };
 
 enum { OK = 200, NOT_FOUND = 404 };
 
@@ -51,15 +51,18 @@ int len(char *rbuf, char *str) {
 
 int method_str_to_enum(char *method) {
     if (strcmp(method, "GET") == 0) { return GET; }
-    if (strcmp(method, "HEAD") == 0) { return HEAD; }
-    if (strcmp(method, "OPTIONS") == 0) { return OPTIONS; }
-    if (strcmp(method, "TRACE") == 0) { return TRACE; }
-    if (strcmp(method, "PUT") == 0) { return PUT; }
-    if (strcmp(method, "DELETE") == 0) { return DELETE; }
     if (strcmp(method, "POST") == 0) { return POST; }
-    if (strcmp(method, "PATCH") == 0) { return PATCH; }
-    if (strcmp(method, "CONNECT") == 0) { return CONNECT; }
     return -1;
+}
+
+header* header_new(char *name, char *value) {
+    header* head = malloc(sizeof(header));
+    head->name = malloc(strlen(name) + 1);
+    head->value = malloc(strlen(value) + 1);
+    strcpy(head->name, name);
+    strcpy(head->value, value);
+
+    return head;
 }
 
 /*
@@ -167,21 +170,44 @@ void request_parse(http_request *req, char *rbuf) {
  *   HTTP Response functions
  */
 
-http_response* response_new() {
+http_response* response_new(int status_code, char *phrase, char *body, header** headers, int header_count) {
     http_response *res = malloc(sizeof(http_response));
-    res->version = NULL;
-    res->status_code = -1;
-    res->phrase = NULL;
-    res->body = NULL;
-    res->headers = NULL;
+    res->version = "HTTP/1.0";
+    res->status_code = status_code;
+    
+    res->phrase = malloc(strlen(phrase) + 1);
+    strcpy(res->phrase, phrase);
+
+    res->body = malloc(strlen(body) + 1);
+    strcpy(res->body, body);
+
+    header *head = header_new("Content-Type", "text/html");
+    res->headers = malloc(sizeof(header*) * 2);
+    res->headers[0] = head;
+    
+    size_t body_length = strlen(res->body);
+    char length_str[32];  // Buffer for length string
+    snprintf(length_str, sizeof(length_str), "%zu", body_length);
+    header *head2 = header_new("Content-Length", length_str);
+    res->headers[1] = head2;
+
+    res->header_count = 2;
+    
+    if (headers) {
+        res->headers = realloc(res->headers,
+                               (res->header_count + header_count) * sizeof(header*));
+        for (int i = res->header_count; i < header_count; i++) {
+            res->headers[i] = headers[i];
+        }
+        res->header_count += header_count;
+    }
 
     return res;
 }
 
 void response_del(http_response *res) {
-    free(res->version);
     free(res->phrase);
-    
+
     for (int i = 0; i < res->header_count; i++) {
         if (res->headers[i] != NULL) {
             free(res->headers[i]->name);
@@ -190,45 +216,84 @@ void response_del(http_response *res) {
         }
     }
 
+    free(res->headers);
     free(res->body);
     free(res);
 }
 
+http_response* handle_GET_request(http_request *req) {
+    char *ubuf = malloc(strlen(req->uri) + 2);
+    strcpy(ubuf + 1, req->uri);
+    ubuf[0] = '.';
+    
+    FILE *file;
+    file = fopen(ubuf, "r");
+
+    if (file == NULL) {
+        return response_new(NOT_FOUND,
+                            "Not found",
+                            "<html><body>Not found!</body></html>",
+                            NULL, 0);
+    }
+
+    fseek(file, 0, SEEK_END);
+    long length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    char *bbuf = malloc(length + 1);
+    fread(bbuf, 1, length, file);
+    bbuf[length] = '\0';
+    
+    http_response *res = response_new(OK, "OK", bbuf, NULL, 0);
+
+    fclose(file);
+    free(ubuf);
+    free(bbuf);
+
+    return res;
+}
+
+
 http_response* handle_request(http_request *req) {
     switch (req->method) {
         case GET:
-            {
-                FILE *file;
-                char *uri = malloc(strlen(req->uri) + 2);
-                strcpy(uri + 1, req->uri);
-                uri[0] = '.';
-                file = fopen(uri, "r");
-                if (file == NULL) { return NULL; }
-                fseek(file, 0, SEEK_END);
-                long length = ftell(file);
-                fseek(file, 0, SEEK_SET);
-                char *body = malloc(length + 1);
-                if (body) {
-                    fread(body, 1, length, file);
-                    body[length] = '\0';
-                }
-                fclose(file);
-                http_response *res = malloc(sizeof(http_response));
-                res->status_code = OK;
-                res->phrase = "OK";
-                res->version = "HTTP/1.1";
-                res->body = malloc(strlen(body) + 1);
-                strcpy(res->body, body);
-                return res;
-            }
-            break;
-            // Look at the requested URL
-            // If it exists, send a response and the file as a body
-            // Else send a 404
+            return handle_GET_request(req);
         case POST: break;
         default: break;
     }
     return NULL;
+}
+
+char* response_to_string(http_response *res) {
+    int size = snprintf(NULL, 0, "%s %d %s\r\n\r\n", 
+                       res->version, res->status_code, res->phrase);
+    
+    for (int i = 0; i < res->header_count; i++) {
+        size += snprintf(NULL, 0, "%s: %s\r\n", 
+                        res->headers[i]->name, res->headers[i]->value);
+    }
+    
+    if (res->body) {
+        size += strlen(res->body) + 1;
+    }
+    
+    char *str = malloc(size + 1);
+    int offset = 0;
+    
+    offset += sprintf(str + offset, "%s %d %s\r\n", 
+                     res->version, res->status_code, res->phrase);
+    
+    for (int i = 0; i < res->header_count; i++) {
+        offset += sprintf(str + offset, "%s: %s\r\n", 
+                         res->headers[i]->name, res->headers[i]->value);
+    }
+    
+    offset += sprintf(str + offset, "\r\n");
+    if (res->body) {
+        offset += sprintf(str + offset, "%s\n", res->body);
+    }
+    
+    return str;
 }
 
 static void die(const char *msg) {
@@ -270,28 +335,6 @@ int main(void) {
         }
         
         rbuf[n] = '\0';
-        
-        #if 0
-        for (int i = 0; rbuf[i] != '\0'; i++) {
-            switch (rbuf[i]) {
-                case '\n':
-                    printf("\\n");
-                    break;
-                case '\r':
-                    printf("\\r");
-                    break;
-                case '\t':
-                    printf("\\t");
-                    break;
-                case '\\':
-                    printf("\\\\");
-                    break;
-                default:
-                    printf("%c", rbuf[i]);
-            }
-        }
-        printf("\n");
-        #endif
 
         if (n > 0) {
             http_request* req = request_new(); 
@@ -303,18 +346,11 @@ int main(void) {
                 printf("%s:%s\n", req->headers[i]->name, req->headers[i]->value);
             }
 
-            // handle_request(req);
+            http_response *res = handle_request(req);
+            char *wbuf = response_to_string(res);
+            write(connfd, wbuf, strlen(wbuf));
 
-            // if (strcmp(req->uri, "/") == 0) {
-            //     char wbuf[] = "HTTP/1.1 200 OK\r\n"
-            //         "Date: Mon, 27 Jul 2002 11:38:44 GMT\r\n"
-            //         "Content-Type: text/html\r\n"
-            //         "Content-Length: 46\r\n"
-            //         "\r\n"
-            //         "<html><body><h1>Hello, World!</h1></body></html>";
-            //     write(connfd, wbuf, strlen(wbuf));
-            // }
-
+            response_del(res);
             request_del(req);
         };
         close(connfd);
