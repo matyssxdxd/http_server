@@ -9,12 +9,31 @@
 #include <string.h>
 
 #define PORT 1337
+#define READ_BUFFER_SIZE 65536 
 
-enum { GET = 1, POST };
+typedef enum {
+    HEADER_CONTENT_LENGTH,
+    HEADER_CONTENT_TYPE,
+    HEADER_CONNECTION,
+    HEADER_USER_AGENT,
+    HEADER_ACCEPT,
+    HEADER_AUTHORIZATION,
+    HEADER_UNKNOWN
+} header_type;
 
-enum { OK = 200, NOT_FOUND = 404 };
+typedef enum { 
+    GET, 
+    POST 
+} method_type;
+
+typedef enum { 
+    OK = 200, 
+    NOT_FOUND = 404,
+    BAD_REQUEST = 400
+} status_code;
 
 typedef struct header {
+    header_type type;
     char *name;
     char *value;
 } header;
@@ -55,14 +74,53 @@ int method_str_to_enum(char *method) {
     return -1;
 }
 
-header* header_new(char *name, char *value) {
+static void die(const char *msg) {
+    int err = errno;
+    fprintf(stderr, "[%d] %s\n", err, msg);
+    abort();
+}
+
+
+/*
+ *  Header functions
+ */
+
+header* header_new(header_type type, char *name, char *value) {
     header* head = malloc(sizeof(header));
+    head->type = type;
     head->name = malloc(strlen(name) + 1);
     head->value = malloc(strlen(value) + 1);
     strcpy(head->name, name);
     strcpy(head->value, value);
 
     return head;
+}
+
+void header_del(header* head) {
+    free(head->name);
+    free(head->value);
+    free(head);
+}
+
+header_type header_get_type(const char *name) {
+    static const struct {
+        const char *name;
+        header_type type;
+    } header_map[] = {
+        {"Content-Length", HEADER_CONTENT_LENGTH},
+        {"Content-Type", HEADER_CONTENT_TYPE},
+        {"Connection", HEADER_CONNECTION},
+        {"User-Agent", HEADER_USER_AGENT},
+        {"Accept", HEADER_ACCEPT},
+        {"Authorization", HEADER_AUTHORIZATION}
+    };
+
+    for (size_t i = 0; i < sizeof(header_map) / sizeof(header_map[0]); i++) {
+        if (strcmp(name, header_map[i].name) == 0) {
+            return header_map[i].type;
+        }
+    }
+    return HEADER_UNKNOWN;
 }
 
 /*
@@ -81,6 +139,13 @@ http_request* request_new() {
     return req;
 }
 
+void request_add_header(http_request *req, header *head) {
+    req->headers = realloc(req->headers,
+                           (req->header_count + 1) * sizeof(header*));
+    req->headers[req->header_count] = head;
+    req->header_count++;
+}
+
 void request_del(http_request *req) {
     if (req == NULL) { return; }
     
@@ -89,9 +154,7 @@ void request_del(http_request *req) {
 
     for (int i = 0; i < req->header_count; i++) {
         if (req->headers[i] != NULL) {
-            free(req->headers[i]->name);
-            free(req->headers[i]->value);
-            free(req->headers[i]);
+            header_del(req->headers[i]);
         }
     }
 
@@ -99,71 +162,93 @@ void request_del(http_request *req) {
     free(req);
 }
 
-void request_first_line(http_request *req, char *rbuf) {
-    int length = len(rbuf, " ");
-    if (length <= 0) { printf("Error"); }
-    char *mbuf = malloc(length + 1);
-    strncpy(mbuf, rbuf, length);
-    mbuf[length] = '\0';
-    int method = method_str_to_enum(mbuf);
-    if (method <= 0) { return; } // return an error response 400
-    req->method = method;
-    req->len += length + 1;
-    free(mbuf);
+http_request* request_parse(char *rbuf) {
+    http_request *req = request_new();
+    char *tmp_ptr = rbuf;
 
-    length = len(rbuf + req->len, " ");
-    req->uri = malloc(length + 1);
-    strncpy(req->uri, rbuf + req->len, length);
-    req->uri[length] = '\0';
-    req->len += length + 1;
-
-    length = len(rbuf + req->len, "\r\n");
-    req->version = malloc(length + 1);
-    strncpy(req->version, rbuf + req->len, length);
-    req->version[length] = '\0';
-    req->len += length + 2;
-}
-
-void request_headers(http_request *req, char *rbuf) {
-    while (1) {
-        char *pos = strstr(rbuf + req->len, "\r\n");
-        if (pos == NULL) {
-            break;
-        }
-
-        int length = pos - rbuf - req->len;
-        if (length == 0) { req->len += 2; break; }
-
-        char *buf = malloc(length + 1);
-        strncpy(buf, rbuf + req->len, length);
-        buf[length] = '\0';
-        pos = strstr(buf, ":");
-        if (pos != NULL) {
-            header *head = malloc(sizeof(header));
-            int name_len = pos - buf;
-            char *value_pos = pos + 2;
-            int value_len = (buf + length) - value_pos;
-
-            head->name = malloc(name_len + 1); 
-            head->value = malloc(value_len + 1);
-            strncpy(head->name, buf, name_len);
-            strncpy(head->value, value_pos, value_len); 
-            head->name[name_len] = '\0';
-            head->value[value_len] = '\0';
-
-            req->headers = realloc(req->headers,
-                                   (req->header_count + 1) * sizeof(header*));
-            req->headers[req->header_count] = head;
-            req->header_count++;
-        }
-        free(buf);
-        req->len += length + 2;
+    char *pos = strchr(tmp_ptr, ' ');
+    if (!pos) {
+        // All of these should be 400 Bad Request
+        printf("Error: Cannot find the end of the HTTP method.");
+        free(req);
+        return NULL;
     }
-}
 
-void request_parse(http_request *req, char *rbuf) {
-    request_first_line(req, rbuf);
-    request_headers(req, rbuf);
+    int method_len = pos - tmp_ptr;
+    char *mbuf = malloc(method_len + 1);
+    strncpy(mbuf, tmp_ptr, method_len);
+    mbuf[method_len] = '\0';
+
+    int method = method_str_to_enum(mbuf);
+    req->method = method;
+    free(mbuf);
+    if (method < 0) { 
+        printf("Error: Unsupported method.");
+        free(req);
+        return NULL; 
+    } 
+
+    tmp_ptr = pos;
+    while (*tmp_ptr == ' ') { tmp_ptr++; }
+
+    char *pos2 = strchr(tmp_ptr, ' ');
+    if (!pos2) {
+        printf("Error: Cannot find the end of the HTTP request URI.");
+        free(req);
+        return NULL;
+    }
+
+    int uri_len = pos2 - tmp_ptr;
+    req->uri = malloc(uri_len + 1);
+    strncpy(req->uri, tmp_ptr, uri_len);
+    req->uri[uri_len] = '\0';
+
+    tmp_ptr = pos2;
+    while (*tmp_ptr == ' ') { tmp_ptr++; }
+
+    char *crlf = strstr(tmp_ptr, "\r\n");
+    if (!crlf) {
+        printf("Error: Cannot find the end of the HTTP version.");
+        free(req);
+        return NULL;
+    }
+
+    int version_len = crlf - tmp_ptr;
+    req->version = malloc(version_len + 1);
+    strncpy(req->version, tmp_ptr, version_len);
+    req->version[version_len] = '\0';
+
+    int parsed_len = (crlf - rbuf) + 2;
+
+    char *header_pos = rbuf + parsed_len;
+    while (1) {
+        char *line_end = strstr(header_pos, "\r\n");
+        if (!line_end || line_end == header_pos) { break; }
+
+        char *colon = strchr(header_pos, ':');
+        if (!colon || colon > line_end) { continue; }
+
+        int name_len = colon - header_pos;
+        char *name = malloc(name_len + 1);
+        strncpy(name, header_pos, name_len);
+        name[name_len] = '\0';
+
+        char *value_start = colon + 1;
+        while (value_start < line_end && *value_start == ' ') {
+            value_start++;
+        }
+
+        int value_len = line_end - value_start;
+        char *value = malloc(value_len + 1);
+        strncpy(value, value_start, value_len);
+        value[value_len] = '\0';
+
+        header *head = header_new(header_get_type(name), name, value);
+        request_add_header(req, head);
+        header_pos = line_end + 2;
+    }
+
+    return req;
 }
 
 /*
@@ -174,25 +259,15 @@ http_response* response_new(int status_code, char *phrase, char *body, header** 
     http_response *res = malloc(sizeof(http_response));
     res->version = "HTTP/1.0";
     res->status_code = status_code;
-    
+    res->header_count = 0;
+    res->headers = NULL;
+
     res->phrase = malloc(strlen(phrase) + 1);
     strcpy(res->phrase, phrase);
 
     res->body = malloc(strlen(body) + 1);
     strcpy(res->body, body);
 
-    header *head = header_new("Content-Type", "text/html");
-    res->headers = malloc(sizeof(header*) * 2);
-    res->headers[0] = head;
-    
-    size_t body_length = strlen(res->body);
-    char length_str[32];  // Buffer for length string
-    snprintf(length_str, sizeof(length_str), "%zu", body_length);
-    header *head2 = header_new("Content-Length", length_str);
-    res->headers[1] = head2;
-
-    res->header_count = 2;
-    
     if (headers) {
         res->headers = realloc(res->headers,
                                (res->header_count + header_count) * sizeof(header*));
@@ -210,12 +285,10 @@ void response_del(http_response *res) {
 
     for (int i = 0; i < res->header_count; i++) {
         if (res->headers[i] != NULL) {
-            free(res->headers[i]->name);
-            free(res->headers[i]->value);
-            free(res->headers[i]);
+            header_del(res->headers[i]);
         }
     }
-
+    
     free(res->headers);
     free(res->body);
     free(res);
@@ -248,7 +321,6 @@ http_response* handle_GET_request(http_request *req) {
 
     fclose(file);
     free(ubuf);
-    free(bbuf);
 
     return res;
 }
@@ -296,10 +368,28 @@ char* response_to_string(http_response *res) {
     return str;
 }
 
-static void die(const char *msg) {
-    int err = errno;
-    fprintf(stderr, "[%d] %s\n", err, msg);
-    abort();
+int read_http_request(int sockfd, char *buf) {
+    int total_read = 0;
+    char *header_end = NULL;
+
+    while (total_read < READ_BUFFER_SIZE - 1) {
+        ssize_t n = read(sockfd, buf + total_read, READ_BUFFER_SIZE - total_read - 1);
+
+        if (n <= 0) {
+            if (n < 0) { die("read()"); }
+            return -1;
+        }
+
+        total_read += n;
+        buf[total_read] = '\0';
+
+        header_end = strstr(buf, "\r\n\r\n");
+        if (header_end) { return total_read; }
+
+        if (total_read >= READ_BUFFER_SIZE - 1) { die("Too large header"); }
+    }
+
+    return total_read;
 }
 
 int main(void) {
@@ -327,24 +417,11 @@ int main(void) {
             continue;
         }
 
-        char rbuf[65536];
-        ssize_t n = read(connfd, rbuf, sizeof(rbuf)- 1);
-        if (n < 0) {
-            die("read()");
-            break;
-        }
-        
-        rbuf[n] = '\0';
+        char rbuf[READ_BUFFER_SIZE];
+        int total_read = read_http_request(connfd, rbuf);
 
-        if (n > 0) {
-            http_request* req = request_new(); 
-            request_parse(req, rbuf);
-            printf("Method: %d\n", req->method);
-            printf("Uri: %s\n", req->uri);
-            printf("Version: %s\n", req->version);
-            for (int i = 0; i < req->header_count; i++) {
-                printf("%s:%s\n", req->headers[i]->name, req->headers[i]->value);
-            }
+        if (total_read > 0) {
+            http_request *req = request_parse(rbuf);
 
             http_response *res = handle_request(req);
             char *wbuf = response_to_string(res);
