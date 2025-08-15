@@ -58,6 +58,12 @@ typedef struct http_response {
     char *body;
 } http_response;
 
+typedef struct pairs {
+    char** key;
+    char** value;
+    int len;
+} pairs;
+
 /*
  *  Helpers
  */
@@ -404,6 +410,10 @@ http_response* handle_GET_request(http_request *req) {
 
 http_response* handle_POST_request(http_request *req) {
     char *tmp_ptr = req->body;
+    pairs *key_vals = malloc(sizeof(pairs));
+    key_vals->key = NULL;
+    key_vals->value = NULL;
+    key_vals->len = 0;
     while (1) {
         char *amp_pos = strchr(tmp_ptr, '&');
         char *eq_pos = strchr(tmp_ptr, '='); 
@@ -420,9 +430,13 @@ http_response* handle_POST_request(http_request *req) {
         strncpy(val, eq_pos + 1, val_len);
         key[key_len] = '\0';
         val[val_len] = '\0';
-        printf("key: %s, value: %s\n", key, val);
-        free(key);
-        free(val);
+        key_vals->key = realloc(key_vals->key,
+                                (key_vals->len + 1) * sizeof(char*));
+        key_vals->value = realloc(key_vals->value,
+                                (key_vals->len + 1) * sizeof(char*));
+        key_vals->key[key_vals->len] = key;
+        key_vals->value[key_vals->len] = val;
+        key_vals->len++;
         if (amp_pos) {
             tmp_ptr = amp_pos + 1;
         } else {
@@ -431,7 +445,21 @@ http_response* handle_POST_request(http_request *req) {
     }
     // Extract key:value pairs from body
     // Do something with it?
-    return response_bad_request();
+    // Needs cleanup, no idea what to do with them
+    for (int i = 0; i < key_vals->len; i++) {
+        printf("%s: %s\n", key_vals->key[i], key_vals->value[i]);
+    }
+
+    for (int i = 0; i < key_vals->len; i++) {
+        free(key_vals->key[i]);
+        free(key_vals->value[i]);
+    }
+    
+    free(key_vals->key);
+    free(key_vals->value);
+    free(key_vals);
+
+    return response_ok("<html><body><h1>Success!</h1></html></body>");
 }
 
 
