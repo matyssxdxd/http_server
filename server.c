@@ -64,17 +64,22 @@ typedef struct pairs {
     int len;
 } pairs;
 
+typedef struct route {
+    method_type method;
+    char* uri;
+    char* file_path;
+} route;
+
+typedef struct HTTP_server {
+    int fd;
+    struct sockaddr_in addr;
+    route** routes;
+    int route_count;
+} HTTP_server;
+
 /*
  *  Helpers
  */
-
-int len(char *rbuf, char *str) {
-    char *pos = strstr(rbuf, str);
-    if (pos != NULL) {
-        return pos - rbuf;
-    }
-    return -1;
-}
 
 method_type method_str_to_enum(char *method) {
     if (strcmp(method, "GET") == 0) { return GET; }
@@ -380,13 +385,14 @@ void response_del(http_response *res) {
     free(res);
 }
 
-http_response* handle_GET_request(http_request *req) {
-    char *ubuf = malloc(strlen(req->uri) + 2);
-    strcpy(ubuf + 1, req->uri);
-    ubuf[0] = '.';
+int find_route(HTTP_server* server, char* uri, method_type method);
+
+http_response* handle_GET_request(HTTP_server* server, http_request *req) {
+    int route_idx = find_route(server, req->uri, req->method);
+    if (route_idx == -1) { return response_not_found(); }
     
     FILE *file;
-    file = fopen(ubuf, "r");
+    file = fopen(server->routes[route_idx]->file_path, "r");
 
     if (file == NULL) {
         return response_not_found();
@@ -403,12 +409,12 @@ http_response* handle_GET_request(http_request *req) {
     http_response *res = response_ok(bbuf);
 
     fclose(file);
-    free(ubuf);
 
     return res;
 }
 
 http_response* handle_POST_request(http_request *req) {
+    
     char *tmp_ptr = req->body;
     pairs *key_vals = malloc(sizeof(pairs));
     key_vals->key = NULL;
@@ -463,10 +469,10 @@ http_response* handle_POST_request(http_request *req) {
 }
 
 
-http_response* handle_request(http_request *req) {
+http_response* handle_request(HTTP_server* server, http_request *req) {
     switch (req->method) {
         case GET:
-            return handle_GET_request(req);
+            return handle_GET_request(server, req);
         case POST: 
             return handle_POST_request(req);
         default: 
@@ -530,27 +536,36 @@ int read_http_request(int sockfd, char *buf) {
     return total_read;
 }
 
-int main(void) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+HTTP_server* new_server(char* addr, int port) {
+    HTTP_server* server = malloc(sizeof(HTTP_server)); 
+    server->routes = NULL;
+    server->route_count = 0;
+
+    server->fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server->fd < 0) { die("Error creating socket"); }
 
     int val = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+    setsockopt(server->fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT);
-    addr.sin_addr.s_addr = htonl(0);
-    int rv = bind(fd, (const struct sockaddr *)&addr, sizeof(addr));
-    if (rv) { die("bind()"); }
+    memset(&server->addr, 0, sizeof(server->addr));
+    server->addr.sin_family = AF_INET;
+    server->addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, addr, &(server->addr.sin_addr)) == 0) { die("Invalid IPv4 address"); };
 
-    rv = listen(fd, SOMAXCONN);
-    if (rv) { die("listen()"); }
-    
+    if (bind(server->fd, (const struct sockaddr *)&server->addr, sizeof(server->addr))) {
+        die("Error binding socket");
+    }
+
+    if (listen(server->fd, SOMAXCONN)) { die("Error listening"); }
+
+    return server;
+}
+
+void launch_server(HTTP_server* server) {
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t addrlen = sizeof(client_addr);
-        int connfd = accept(fd, (struct sockaddr *)&client_addr, &addrlen);
+        int connfd = accept(server->fd, (struct sockaddr *)&client_addr, &addrlen);
         if (connfd < 0) {
             continue;
         }
@@ -559,7 +574,8 @@ int main(void) {
         int total_read = read_http_request(connfd, rbuf);
 
         http_request *req = request_parse(rbuf);
-        http_response *res = handle_request(req);
+        if (strcmp(req->uri, "/favicon.ico") == 0) { write(connfd, "yes", 3); continue; }
+        http_response *res = handle_request(server, req);
 
         char *wbuf = response_to_string(res);
         write(connfd, wbuf, strlen(wbuf));
@@ -569,7 +585,49 @@ int main(void) {
 
         close(connfd);
     }
+}
 
-    close(fd);
+void close_server(HTTP_server* server) {
+    close(server->fd);
+    free(server);
+}
+
+void new_route(HTTP_server* server, char* uri, char* file_path, method_type method) {
+    server->routes = realloc(server->routes,
+                             (server->route_count + 1) * sizeof(route*));
+
+    route* new_route = malloc(sizeof(route));
+    new_route->method = method;
+
+    new_route->uri = malloc(strlen(uri) + 1);
+    strcpy(new_route->uri, uri);
+
+    new_route->file_path = malloc(strlen(file_path) + 1);
+    strcpy(new_route->file_path, file_path);
+    
+    server->routes[server->route_count] = new_route;
+    server->route_count++;
+}
+
+int find_route(HTTP_server* server, char* uri, method_type method) {
+    for (int i = 0; i < server->route_count; i++) {
+        if (strcmp(server->routes[i]->uri, uri) == 0 && server->routes[i]->method == method) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+int main(void) {
+    HTTP_server* server = new_server("127.0.0.1", PORT);
+
+    new_route(server, "/", "./index.html", GET);
+    new_route(server, "/form", "./form.html", GET);
+    new_route(server, "/form", "./form.html", POST);
+
+    launch_server(server);
+    close_server(server);
+    
     return 0;
 }
