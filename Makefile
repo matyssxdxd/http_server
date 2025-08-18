@@ -1,2 +1,2 @@
 server: server.c
-	$(CC) server.c -o server -Wall -Wextra -pedantic -std=c99
+	$(CC) main.c server.c -o server -Wall -Wextra -pedantic -std=c99

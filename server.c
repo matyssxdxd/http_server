@@ -7,99 +7,28 @@
 #include <sys/socket.h>
 #include <netinet/ip.h>
 #include <string.h>
+#include "server.h"
 
-#define PORT 1337
 #define READ_BUFFER_SIZE 65536 
 
-typedef enum {
-    HEADER_CONTENT_LENGTH,
-    HEADER_CONTENT_TYPE,
-    HEADER_CONNECTION,
-    HEADER_USER_AGENT,
-    HEADER_ACCEPT,
-    HEADER_AUTHORIZATION,
-    HEADER_UNKNOWN
-} header_type;
-
-typedef enum { 
-    GET = 1, 
-    POST 
-} method_type;
-
-typedef enum { 
-    UNKNOWN = -1,
-    OK = 200, 
-    NOT_FOUND = 404,
-    BAD_REQUEST = 400
-} status_type;
-
-typedef struct header {
-    header_type type;
-    char *name;
-    char *value;
-} header;
-
-typedef struct http_request {
-    method_type method;
-    char *uri;
-    char *version;
-    header **headers;
-    int header_count;
-    char *body;
-    int body_length;
-} http_request;
-
-typedef struct http_response {
-    char *version;
-    status_type status_code;
-    char *phrase;
-    header **headers;
-    int header_count;
-    char *body;
-} http_response;
-
-typedef struct pairs {
-    char** key;
-    char** value;
-    int len;
-} pairs;
-
-typedef struct route {
-    method_type method;
-    char* uri;
-    char* file_path;
-} route;
-
-typedef struct HTTP_server {
-    int fd;
-    struct sockaddr_in addr;
-    route** routes;
-    int route_count;
-} HTTP_server;
-
-/*
- *  Helpers
- */
-
-method_type method_str_to_enum(char *method) {
-    if (strcmp(method, "GET") == 0) { return GET; }
-    if (strcmp(method, "POST") == 0) { return POST; }
-    return -1;
-}
-
-static void die(const char *msg) {
+static void die(const char* msg) {
     int err = errno;
     fprintf(stderr, "[%d] %s\n", err, msg);
     abort();
 }
 
+method_t method_str_to_enum(char* method) {
+    if (strcmp(method, "GET") == 0) { return HTTP_GET; }
+    if (strcmp(method, "POST") == 0) { return HTTP_POST; }
+    return -1;
+}
 
 /*
  *  Header functions
  */
 
-header* header_new(header_type type, char *name, char *value) {
-    header* head = malloc(sizeof(header));
+http_header* new_header(header_t type, char* name, char* value) {
+    http_header* head = malloc(sizeof(http_header));
     head->type = type;
     head->name = malloc(strlen(name) + 1);
     head->value = malloc(strlen(value) + 1);
@@ -109,16 +38,16 @@ header* header_new(header_type type, char *name, char *value) {
     return head;
 }
 
-void header_del(header* head) {
+void del_header(http_header* head) {
     free(head->name);
     free(head->value);
     free(head);
 }
 
-header_type header_get_type(const char *name) {
+header_t get_header_type(const char* name) {
     static const struct {
-        const char *name;
-        header_type type;
+        const char* name;
+        header_t type;
     } header_map[] = {
         {"Content-Length", HEADER_CONTENT_LENGTH},
         {"Content-Type", HEADER_CONTENT_TYPE},
@@ -136,7 +65,7 @@ header_type header_get_type(const char *name) {
     return HEADER_UNKNOWN;
 }
 
-char* header_get_value(http_request *req, const header_type type) {
+char* get_header_value(http_request* req, const header_t type) {
     for (int i = 0; i < req->header_count; i++) {
         if (req->headers[i]->type == type) { return req->headers[i]->value; }
     }
@@ -147,8 +76,8 @@ char* header_get_value(http_request *req, const header_type type) {
  *   HTTP Request functions
  */
 
-http_request* request_new() {
-    http_request *req = malloc(sizeof(http_request));
+http_request* new_request() {
+    http_request* req = malloc(sizeof(http_request));
     req->method = -1;
     req->uri = NULL;
     req->version = NULL;
@@ -160,14 +89,14 @@ http_request* request_new() {
     return req;
 }
 
-void request_add_header(http_request *req, header *head) {
+void add_request_header(http_request* req, http_header* head) {
     req->headers = realloc(req->headers,
-                           (req->header_count + 1) * sizeof(header*));
+                           (req->header_count + 1) * sizeof(http_header*));
     req->headers[req->header_count] = head;
     req->header_count++;
 }
 
-void request_del(http_request *req) {
+void del_request(http_request* req) {
     if (req == NULL) { return; }
     
     free(req->uri);
@@ -175,7 +104,7 @@ void request_del(http_request *req) {
 
     for (int i = 0; i < req->header_count; i++) {
         if (req->headers[i] != NULL) {
-            header_del(req->headers[i]);
+            del_header(req->headers[i]);
         }
     }
 
@@ -183,24 +112,23 @@ void request_del(http_request *req) {
     free(req);
 }
 
-http_request* request_parse(char *rbuf) {
-    http_request *req = request_new();
-    char *tmp_ptr = rbuf;
+http_request* parse_request(char* rbuf) {
+    http_request* req = new_request();
+    char* tmp_ptr = rbuf;
 
-    char *pos = strchr(tmp_ptr, ' ');
+    char* pos = strchr(tmp_ptr, ' ');
     if (!pos) {
-        // All of these should be 400 Bad Request
         printf("Error: Cannot find the end of the HTTP method.");
         free(req);
         return NULL;
     }
 
     int method_len = pos - tmp_ptr;
-    char *mbuf = malloc(method_len + 1);
+    char* mbuf = malloc(method_len + 1);
     strncpy(mbuf, tmp_ptr, method_len);
     mbuf[method_len] = '\0';
 
-    method_type method = method_str_to_enum(mbuf);
+    method_t method = method_str_to_enum(mbuf);
     req->method = method;
     free(mbuf);
     if (method < 0) { 
@@ -212,7 +140,7 @@ http_request* request_parse(char *rbuf) {
     tmp_ptr = pos;
     while (*tmp_ptr == ' ') { tmp_ptr++; }
 
-    char *pos2 = strchr(tmp_ptr, ' ');
+    char* pos2 = strchr(tmp_ptr, ' ');
     if (!pos2) {
         printf("Error: Cannot find the end of the HTTP request URI.");
         free(req);
@@ -227,7 +155,7 @@ http_request* request_parse(char *rbuf) {
     tmp_ptr = pos2;
     while (*tmp_ptr == ' ') { tmp_ptr++; }
 
-    char *crlf = strstr(tmp_ptr, "\r\n");
+    char* crlf = strstr(tmp_ptr, "\r\n");
     if (!crlf) {
         printf("Error: Cannot find the end of the HTTP version.");
         free(req);
@@ -241,37 +169,37 @@ http_request* request_parse(char *rbuf) {
 
     int parsed_len = (crlf - rbuf) + 2;
 
-    char *header_pos = rbuf + parsed_len;
+    char* header_pos = rbuf + parsed_len;
     while (1) {
-        char *line_end = strstr(header_pos, "\r\n");
+        char* line_end = strstr(header_pos, "\r\n");
         if (!line_end || line_end == header_pos) { break; }
 
-        char *colon = strchr(header_pos, ':');
+        char* colon = strchr(header_pos, ':');
         if (!colon || colon > line_end) { continue; }
 
         int name_len = colon - header_pos;
-        char *name = malloc(name_len + 1);
+        char* name = malloc(name_len + 1);
         strncpy(name, header_pos, name_len);
         name[name_len] = '\0';
 
-        char *value_start = colon + 1;
+        char* value_start = colon + 1;
         while (value_start < line_end && *value_start == ' ') {
             value_start++;
         }
 
         int value_len = line_end - value_start;
-        char *value = malloc(value_len + 1);
+        char* value = malloc(value_len + 1);
         strncpy(value, value_start, value_len);
         value[value_len] = '\0';
 
-        header *head = header_new(header_get_type(name), name, value);
-        request_add_header(req, head);
+        http_header *head = new_header(get_header_type(name), name, value);
+        add_request_header(req, head);
         header_pos = line_end + 2;
     }
 
-    char *body_pos = header_pos + 2;
-    if (req->method == POST) {
-        char *body_len = header_get_value(req, HEADER_CONTENT_LENGTH);
+    char* body_pos = header_pos + 2;
+    if (req->method == HTTP_POST) {
+        char* body_len = get_header_value(req, HEADER_CONTENT_LENGTH);
         if (body_len == NULL) {
             // Probably need to handle this somehow
             return req;
@@ -289,8 +217,8 @@ http_request* request_parse(char *rbuf) {
  *   HTTP Response functions
  */
 
-http_response* response_new() {
-    http_response *res = malloc(sizeof(http_response));
+http_response* new_response() {
+    http_response* res = malloc(sizeof(http_response));
     res->version = NULL;
     res->status_code = UNKNOWN;
     res->headers = NULL;
@@ -301,20 +229,20 @@ http_response* response_new() {
     return res;
 }
 
-void add_default_headers(http_response *res) {
+void add_default_headers(http_response* res) {
     size_t body_len = strlen(res->body);
     char body_len_str[32];
     snprintf(body_len_str, sizeof(body_len_str), "%zu", body_len);
-    header *content_len = header_new(HEADER_CONTENT_LENGTH, "Content-Length", body_len_str);
-    header *content_type = header_new(HEADER_CONTENT_TYPE, "Content-Type", "text/html");
+    http_header* content_len = new_header(HEADER_CONTENT_LENGTH, "Content-Length", body_len_str);
+    http_header* content_type = new_header(HEADER_CONTENT_TYPE, "Content-Type", "text/html");
 
-    res->headers = malloc(sizeof(header*) * 2);
+    res->headers = malloc(sizeof(http_header*) * 2);
     res->headers[res->header_count++] = content_len;
     res->headers[res->header_count++] = content_type;
 }
 
 http_response* response_bad_request() {
-    http_response *res = response_new();
+    http_response* res = new_response();
     
     res->version = malloc(strlen("HTTP/1.0") + 1);
     strcpy(res->version, "HTTP/1.0");
@@ -333,7 +261,7 @@ http_response* response_bad_request() {
 }
 
 http_response* response_not_found() {
-    http_response *res = response_new();
+    http_response* res = new_response();
 
     res->version = malloc(strlen("HTTP/1.0") + 1);
     strcpy(res->version, "HTTP/1.0");
@@ -351,8 +279,8 @@ http_response* response_not_found() {
     return res;
 }
 
-http_response* response_ok(char *body) {
-    http_response *res = response_new();
+http_response* response_ok(char* body) {
+    http_response* res = new_response();
 
     res->version = malloc(strlen("HTTP/1.0") + 1);
     strcpy(res->version, "HTTP/1.0");
@@ -370,13 +298,13 @@ http_response* response_ok(char *body) {
     return res;
 }
 
-void response_del(http_response *res) {
+void del_response(http_response* res) {
     free(res->version);
     free(res->phrase);
 
     for (int i = 0; i < res->header_count; i++) {
         if (res->headers[i] != NULL) {
-            header_del(res->headers[i]);
+            del_header(res->headers[i]);
         }
     }
     
@@ -385,13 +313,11 @@ void response_del(http_response *res) {
     free(res);
 }
 
-int find_route(HTTP_server* server, char* uri, method_type method);
-
-http_response* handle_GET_request(HTTP_server* server, http_request *req) {
+http_response* handle_GET_request(http_server* server, http_request* req) {
     int route_idx = find_route(server, req->uri, req->method);
     if (route_idx == -1) { return response_not_found(); }
     
-    FILE *file;
+    FILE* file;
     file = fopen(server->routes[route_idx]->file_path, "r");
 
     if (file == NULL) {
@@ -406,23 +332,23 @@ http_response* handle_GET_request(HTTP_server* server, http_request *req) {
     fread(bbuf, 1, length, file);
     bbuf[length] = '\0';
     
-    http_response *res = response_ok(bbuf);
+    http_response* res = response_ok(bbuf);
 
     fclose(file);
 
     return res;
 }
 
-http_response* handle_POST_request(http_request *req) {
+http_response* handle_POST_request(http_request* req) {
     
-    char *tmp_ptr = req->body;
-    pairs *key_vals = malloc(sizeof(pairs));
+    char* tmp_ptr = req->body;
+    pairs* key_vals = malloc(sizeof(pairs));
     key_vals->key = NULL;
     key_vals->value = NULL;
     key_vals->len = 0;
     while (1) {
-        char *amp_pos = strchr(tmp_ptr, '&');
-        char *eq_pos = strchr(tmp_ptr, '='); 
+        char* amp_pos = strchr(tmp_ptr, '&');
+        char* eq_pos = strchr(tmp_ptr, '='); 
         int key_len = eq_pos - tmp_ptr;
         int val_len;
         if (amp_pos) {
@@ -430,8 +356,8 @@ http_response* handle_POST_request(http_request *req) {
         } else {
             val_len = req->body_length - key_len; 
         }
-        char *key = malloc(key_len + 1);
-        char *val = malloc(val_len + 1);
+        char* key = malloc(key_len + 1);
+        char* val = malloc(val_len + 1);
         strncpy(key, tmp_ptr, key_len);
         strncpy(val, eq_pos + 1, val_len);
         key[key_len] = '\0';
@@ -469,18 +395,18 @@ http_response* handle_POST_request(http_request *req) {
 }
 
 
-http_response* handle_request(HTTP_server* server, http_request *req) {
+http_response* handle_request(http_server* server, http_request* req) {
     switch (req->method) {
-        case GET:
+        case HTTP_GET:
             return handle_GET_request(server, req);
-        case POST: 
+        case HTTP_POST: 
             return handle_POST_request(req);
         default: 
             return response_bad_request(); 
     }
 }
 
-char* response_to_string(http_response *res) {
+char* response_to_string(http_response* res) {
     int size = snprintf(NULL, 0, "%s %d %s\r\n\r\n", 
                        res->version, res->status_code, res->phrase);
     
@@ -493,7 +419,7 @@ char* response_to_string(http_response *res) {
         size += strlen(res->body) + 1;
     }
     
-    char *str = malloc(size + 1);
+    char* str = malloc(size + 1);
     int offset = 0;
     
     offset += sprintf(str + offset, "%s %d %s\r\n", 
@@ -512,9 +438,9 @@ char* response_to_string(http_response *res) {
     return str;
 }
 
-int read_http_request(int sockfd, char *buf) {
+int read_http_request(int sockfd, char* buf) {
     int total_read = 0;
-    char *header_end = NULL;
+    char* header_end = NULL;
 
     while (total_read < READ_BUFFER_SIZE - 1) {
         ssize_t n = read(sockfd, buf + total_read, READ_BUFFER_SIZE - total_read - 1);
@@ -536,8 +462,8 @@ int read_http_request(int sockfd, char *buf) {
     return total_read;
 }
 
-HTTP_server* new_server(char* addr, int port) {
-    HTTP_server* server = malloc(sizeof(HTTP_server)); 
+http_server* new_server(char* addr, int port) {
+    http_server* server = malloc(sizeof(http_server)); 
     server->routes = NULL;
     server->route_count = 0;
 
@@ -561,7 +487,7 @@ HTTP_server* new_server(char* addr, int port) {
     return server;
 }
 
-void launch_server(HTTP_server* server) {
+void launch_server(http_server* server) {
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t addrlen = sizeof(client_addr);
@@ -571,28 +497,35 @@ void launch_server(HTTP_server* server) {
         }
 
         char rbuf[READ_BUFFER_SIZE];
-        int total_read = read_http_request(connfd, rbuf);
+        read_http_request(connfd, rbuf);
 
-        http_request *req = request_parse(rbuf);
+        http_request* req = parse_request(rbuf);
         if (strcmp(req->uri, "/favicon.ico") == 0) { write(connfd, "yes", 3); continue; }
         http_response *res = handle_request(server, req);
 
         char *wbuf = response_to_string(res);
         write(connfd, wbuf, strlen(wbuf));
 
-        response_del(res);
-        request_del(req);
+        del_response(res);
+        del_request(req);
 
         close(connfd);
     }
 }
 
-void close_server(HTTP_server* server) {
+void close_server(http_server* server) {
     close(server->fd);
+    
+    if (server->routes) {
+        for (int i = 0; i < server->route_count; i++) {
+            del_route(server->routes[i]);
+        }
+    }
+    free(server->routes);
     free(server);
 }
 
-void new_route(HTTP_server* server, char* uri, char* file_path, method_type method) {
+void new_route(http_server* server, char* uri, char* file_path, method_t method) {
     server->routes = realloc(server->routes,
                              (server->route_count + 1) * sizeof(route*));
 
@@ -609,7 +542,13 @@ void new_route(HTTP_server* server, char* uri, char* file_path, method_type meth
     server->route_count++;
 }
 
-int find_route(HTTP_server* server, char* uri, method_type method) {
+void del_route(route* route) {
+    free(route->uri);
+    free(route->file_path);
+    free(route);
+}
+
+int find_route(http_server* server, char* uri, method_t method) {
     for (int i = 0; i < server->route_count; i++) {
         if (strcmp(server->routes[i]->uri, uri) == 0 && server->routes[i]->method == method) {
             return i;
@@ -619,15 +558,3 @@ int find_route(HTTP_server* server, char* uri, method_type method) {
 }
 
 
-int main(void) {
-    HTTP_server* server = new_server("127.0.0.1", PORT);
-
-    new_route(server, "/", "./index.html", GET);
-    new_route(server, "/form", "./form.html", GET);
-    new_route(server, "/form", "./form.html", POST);
-
-    launch_server(server);
-    close_server(server);
-    
-    return 0;
-}
