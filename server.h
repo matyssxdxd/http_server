@@ -88,7 +88,7 @@ http_response* not_found_response();
 http_response* ok_response(char* body); 
 void del_response(http_response* res); 
 http_response* handle_GET_request(http_server* server, http_request* req);
-http_response* handle_POST_request(http_request* req);
+http_response* handle_POST_request(http_server* server, http_request* req);
 http_response* handle_request(http_server* server, http_request* req);
 char* response_to_string(http_response* res);
     

@@ -7,7 +7,7 @@ int main(void) {
 
     new_route(server, "/", "./index.html", HTTP_GET);
     new_route(server, "/form", "./form.html", HTTP_GET);
-    new_route(server, "/form", "./form.html", HTTP_POST);
+    new_route(server, "/form", "./success.html", HTTP_POST);
 
     launch_server(server);
     close_server(server);

@@ -11,6 +11,8 @@
 
 #define READ_BUFFER_SIZE 65536 
 
+pairs* POST = NULL;
+
 static void die(const char* msg) {
     int err = errno;
     fprintf(stderr, "[%d] %s\n", err, msg);
@@ -339,16 +341,39 @@ http_response* handle_GET_request(http_server* server, http_request* req) {
     return res;
 }
 
-http_response* handle_POST_request(http_request* req) {
+http_response* handle_POST_request(http_server* server, http_request* req) {
+    int route_idx = find_route(server, req->uri, req->method);
+    if (route_idx == -1) { return response_not_found(); }
+
+    FILE* file;
+    file = fopen(server->routes[route_idx]->file_path, "r");
+
+    if (file == NULL) {
+        return response_not_found();
+    }
+    
+    fseek(file, 0, SEEK_END);
+    long length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    char *bbuf = malloc(length + 1);
+    fread(bbuf, 1, length, file);
+    bbuf[length] = '\0';
+    
+    http_response* res = response_ok(bbuf);
+
+    fclose(file);
     
     char* tmp_ptr = req->body;
     pairs* key_vals = malloc(sizeof(pairs));
     key_vals->key = NULL;
     key_vals->value = NULL;
     key_vals->len = 0;
+
     while (1) {
         char* amp_pos = strchr(tmp_ptr, '&');
         char* eq_pos = strchr(tmp_ptr, '='); 
+
         int key_len = eq_pos - tmp_ptr;
         int val_len;
         if (amp_pos) {
@@ -356,12 +381,14 @@ http_response* handle_POST_request(http_request* req) {
         } else {
             val_len = req->body_length - key_len; 
         }
+
         char* key = malloc(key_len + 1);
         char* val = malloc(val_len + 1);
         strncpy(key, tmp_ptr, key_len);
         strncpy(val, eq_pos + 1, val_len);
         key[key_len] = '\0';
         val[val_len] = '\0';
+
         key_vals->key = realloc(key_vals->key,
                                 (key_vals->len + 1) * sizeof(char*));
         key_vals->value = realloc(key_vals->value,
@@ -369,29 +396,28 @@ http_response* handle_POST_request(http_request* req) {
         key_vals->key[key_vals->len] = key;
         key_vals->value[key_vals->len] = val;
         key_vals->len++;
+
         if (amp_pos) {
             tmp_ptr = amp_pos + 1;
         } else {
             break;
         }
     }
-    // Extract key:value pairs from body
-    // Do something with it?
-    // Needs cleanup, no idea what to do with them
-    for (int i = 0; i < key_vals->len; i++) {
-        printf("%s: %s\n", key_vals->key[i], key_vals->value[i]);
-    }
-
-    for (int i = 0; i < key_vals->len; i++) {
-        free(key_vals->key[i]);
-        free(key_vals->value[i]);
+    
+    if (POST) {
+    for (int i = 0; i < POST->len; i++) {
+        free(POST->key[i]);
+        free(POST->value[i]);
     }
     
-    free(key_vals->key);
-    free(key_vals->value);
-    free(key_vals);
+    free(POST->key);
+    free(POST->value);
+    free(POST);
+    }
 
-    return response_ok("<html><body><h1>Success!</h1></html></body>");
+    POST = key_vals;
+
+    return res;
 }
 
 
@@ -400,7 +426,7 @@ http_response* handle_request(http_server* server, http_request* req) {
         case HTTP_GET:
             return handle_GET_request(server, req);
         case HTTP_POST: 
-            return handle_POST_request(req);
+            return handle_POST_request(server, req);
         default: 
             return response_bad_request(); 
     }
@@ -437,6 +463,10 @@ char* response_to_string(http_response* res) {
     
     return str;
 }
+
+/*
+ *  HTTP Server functions
+ */
 
 int read_http_request(int sockfd, char* buf) {
     int total_read = 0;
@@ -503,6 +533,12 @@ void launch_server(http_server* server) {
         if (strcmp(req->uri, "/favicon.ico") == 0) { write(connfd, "yes", 3); continue; }
         http_response *res = handle_request(server, req);
 
+        if (req->method == HTTP_POST && res->status_code == OK) {
+            for (int i = 0; i < POST->len; i++) {
+                printf("%s:%s\n", POST->key[i], POST->value[i]);
+            }
+        }
+
         char *wbuf = response_to_string(res);
         write(connfd, wbuf, strlen(wbuf));
 
@@ -523,6 +559,17 @@ void close_server(http_server* server) {
     }
     free(server->routes);
     free(server);
+
+    if (POST) {
+        for (int i = 0; i < POST->len; i++) {
+            free(POST->key[i]);
+            free(POST->value[i]);
+        }
+
+        free(POST->key);
+        free(POST->value);
+        free(POST);
+    }
 }
 
 void new_route(http_server* server, char* uri, char* file_path, method_t method) {
@@ -556,5 +603,3 @@ int find_route(http_server* server, char* uri, method_t method) {
     }
     return -1;
 }
-
-
